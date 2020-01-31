@@ -1,0 +1,14 @@
+{
+    "experiment_reps": 1,
+    "games_per_experiment": 1000,
+
+    "seed": null,
+    "victory_point_goal": 10,
+    "num_players_human": 0,
+    "num_players_cpu": 2,
+
+    "log_level": 1,
+
+    "graphics": false,
+    "turn_delay": 0.1
+}
