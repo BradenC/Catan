@@ -1,12 +1,11 @@
+from copy import copy
 from random import randint, seed, shuffle
-from time import time
+from time import sleep, time
 
-from catan import config
+from catan import config, logger
 from catan.game.board import Board
 from catan.game.constants import DICE_WIDTH, END_TURN_X, END_TURN_Y, ROLL_X, ROLL_Y
 from catan.game.player import Player
-from catan.logging import logger
-from catan.models import model_thing
 
 
 def player_loop(players):
@@ -32,35 +31,63 @@ def player_loop(players):
         yield players[i]
 
 
-class Game:
-    victory_point_goal = config['victory_point_goal']
+def shuffle_players(players):
+    shuffle(players)
+    for i, player in enumerate(players):
+        player.num = i
 
-    def __init__(self, num_humans=0, num_bots=2, is_random=False, canvas=None):
-        if config['seed']:
-            seed(config['seed'])
+
+class Game:
+    def __init__(self, players=[], is_random=False, canvas=None, turn_delay_s=None):
+        if config['game']['seed']:
+            seed(config['game']['seed'])
 
         self.board = Board(self, is_random)
 
-        self.model_thing = model_thing()
-        self.players = [Player(self)                   for _ in range(num_humans)]\
-                     + [Player(self, model=next(self.model_thing)) for _ in range(num_bots)]
-        shuffle(self.players)
+        self._player = 0
+        self.winner = None
+        if players:
+            self.players = [Player(self, player_model) for player_model in players]
+            shuffle_players(self.players)
 
-        self.player_loop = player_loop(self.players)
-        self.player = next(self.player_loop)
+            self.player_loop = player_loop(self.players)
+            self.player = next(self.player_loop)
 
         self.start_time = self.end_time = None
         self.turn_num = 0
-        self.is_finished = False
         self.last_roll = (None, None)
 
         self.c = canvas
         if self.c:
+            self.c.delete("all")
             self.graphics = {}
+            self.turn_delay_s = turn_delay_s
+
+        self.depth = 0
+
+    @property
+    def player(self):
+        return self.players[self._player]
+
+    @player.setter
+    def player(self, player):
+        self._player = player.num
 
     def start(self):
         self.start_time = time()
         self.end_turn()
+
+        self.turn_loop()
+
+        self.finish()
+
+        return self
+
+    def turn_loop(self):
+        while self.player.is_cpu and not self.is_finished:
+            if self.c:
+                sleep(self.turn_delay_s)
+            self.player.do_action()
 
     def is_setup_phase(self):
         return self.turn_num < len(self.players) * 2 + 1
@@ -68,6 +95,14 @@ class Game:
     @property
     def duration(self):
         return self.end_time - self.start_time
+
+    @property
+    def is_finished(self):
+        for player in self.players:
+            if player.victory_points >= config['game']['victory_points_to_win']:
+                return True
+
+        return False
 
     def clear_dice(self):
         self.last_roll = (None, None)
@@ -103,27 +138,20 @@ class Game:
 
     def end_turn(self):
         if not self.can_end_turn():
-            return
+            logger.error('Illegal end turn attempted', data={"player": self.player.name}, tags='actions')
+            raise Exception(f'Illegal end turn by player number {self.player.num}')
 
-        while True:
-            self.turn_num += 1
-            self.clear_dice()
+        self.turn_num += 1
+        self.clear_dice()
 
-            self.player = next(self.player_loop)
-            self.player.turn_num += 1
-
-            self.draw()
-
-            self.player.take_turn()
-
-            if not self.player.is_cpu or self.is_finished:
-                break
+        self.player = next(self.player_loop)
+        self.player.turn_num += 1
 
     def draw_die(self, x, y, val):
         rect = self.c.create_rectangle(x, y, x + 60, y + 60, fill="white")
 
         if not val and not self.is_setup_phase() and not self.player.is_cpu:
-            self.c.tag_bind(rect, "<Button-1>", lambda event: self.roll())
+            self.c.tag_bind(rect, "<Button-1>", lambda event: self.player.roll())
             return
 
         self.graphics['dice'].append(rect)
@@ -193,7 +221,7 @@ class Game:
         text = self.c.create_text(END_TURN_X, END_TURN_Y, text="End Turn", fill="white", font="default 30", anchor="nw")
 
         if not self.player.is_cpu:
-            self.c.tag_bind(text, "<Button-1>", lambda event: self.end_turn())
+            self.c.tag_bind(text, "<Button-1>", lambda event: self.player.end_turn())
 
         self.graphics['end_turn'] = text
 
@@ -203,6 +231,7 @@ class Game:
             self.player.draw()
             self.draw_dice()
             self.draw_end_turn()
+            self.c.update()
 
     def game_recap(self):
         time_string = "{:.4f}".format(self.duration) + 's'
@@ -221,19 +250,42 @@ class Game:
         return player_recap
 
     def finish(self):
-        self.is_finished = True
+        self.winner = self.player
         self.end_time = time()
+        self.draw()
 
-        game_finished_message = 'Game Over'
-        game_recap = self.game_recap()
-        player_recap = self.player_recap()
+        # game_finished_message = 'Game Over'
+        # game_recap = self.game_recap()
+        # player_recap = self.player_recap()
+        #
+        # logger.info(game_finished_message + game_recap + player_recap)
 
-        logger.info(game_finished_message + game_recap + player_recap)
+        logger.info('Game over', data=self.to_dict(), tags='progress')
 
-    def to_jsonable(self):
+    def to_dict(self):
         return {
             'duration_seconds': "{:.4f}".format(self.duration) + 's',
             'num_turns': self.turn_num,
-            'winner': self.player.name,
-            'players': [player.to_jsonable() for player in self.players]
+            'winner': self.winner.name,
+            'players': [player.to_dict() for player in self.players]
         }
+
+    def copy(self):
+        g = Game()
+        g.depth = self.depth + 1
+
+        g.board = self.board.copy(g)
+
+        g.players = [player.copy(g) for player in self.players]
+        g.player_loop = player_loop(g.players)
+
+        for _ in range(self.turn_num + 1):
+            g.player = next(g.player_loop)
+
+        if self.player.num != g.player.num or self.player.name != g.player.name:
+            raise Exception('Game did not copy Players correctly')
+
+        g.turn_num = self.turn_num
+        g.last_roll = self.last_roll
+
+        return g

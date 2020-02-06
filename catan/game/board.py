@@ -2,16 +2,18 @@ from random import shuffle
 from math import cos, pi, sqrt
 from abc import ABCMeta, abstractmethod
 
-from catan.game import HexNumbers, HexTiles, Resource, resource_color
+from catan.game.resource import HexNumbers, HexTiles, Resource
 from catan.game.piece import City, Road, Settlement
 
 X_CELL_DIST = 40
 Y_CELL_DIST = 35
 
-roll_chance = [0, 0, 1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1]
-
 
 class BoardPart(metaclass=ABCMeta):
+    def __init__(self):
+        self.piece = None
+        self.x = None
+        self.y = None
 
     def stringify(self):
         return f"({self.x}, {self.y})"
@@ -19,6 +21,8 @@ class BoardPart(metaclass=ABCMeta):
     @property
     def owner(self):
         if self.piece:
+            if self.piece._location != self:
+                raise Exception('piece location is not where it should be')
             return self.piece.owner
         else:
             return None
@@ -29,7 +33,7 @@ class BoardPart(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def on_click(self):
+    def on_click(self, event):
         pass
 
     @abstractmethod
@@ -38,6 +42,7 @@ class BoardPart(metaclass=ABCMeta):
 
 
 class Hex(BoardPart):
+    roll_chance_arr = [0, 0, 1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1]
     SIDE_LEN = 80
     HEIGHT = SIDE_LEN * 2
     WIDTH = sqrt(3) * SIDE_LEN
@@ -47,9 +52,9 @@ class Hex(BoardPart):
     def __init__(self, board, x, y, resource, num):
         self.board = board
 
-        self.resource = resource
+        self.resource = Resource(name=resource)
         self.num = num
-        self.roll_chance = roll_chance[self.num]
+        self.roll_chance = Hex.roll_chance_arr[self.num]
 
         self.x = x
         self.y = y
@@ -63,7 +68,7 @@ class Hex(BoardPart):
 
     @property
     def color(self):
-        return resource_color(self.resource)
+        return self.resource.color
 
     def get_points(self):
         return [
@@ -102,7 +107,7 @@ class Hex(BoardPart):
     def give_resources(self):
         for point in self.points:
             if point.piece:
-                point.owner.resource_cards[self.resource.value] += point.piece.resource_collection_rate
+                point.owner.resource_cards[self.resource.id] += point.piece.resource_collection_rate
 
     def on_click(self, event):
         pass
@@ -112,13 +117,13 @@ class Hex(BoardPart):
         self.board.game.c.tag_bind(h, '<Button-1>', self.on_click)
 
     def draw_token(self):
-        if self.resource == Resource.DESERT:
+        if self.resource.name == 'desert':
             return
 
         oval_points, text_points = self.token_coords
 
         oval = self.board.game.c.create_oval(oval_points, fill="#FFF")
-        text = self.board.game.c.create_text(text_points, font="Times 10", text=self.num)
+        text = self.board.game.c.create_text(text_points, font="Times 14", text=self.num)
 
         self.board.game.c.tag_bind(oval, '<Button-1>', self.on_click)
         self.board.game.c.tag_bind(text, '<Button-1>', self.on_click)
@@ -146,6 +151,8 @@ class Lane(BoardPart):
 
         self._color = "#111"
         self.graphics = None
+
+        self.point = None
 
     @property
     def color(self):
@@ -275,7 +282,7 @@ class Point(BoardPart):
 
     def add_hex(self, h):
         if h.num:
-            self.resource_generation[h.resource.value] += h.roll_chance
+            self.resource_generation[h.resource.id] += h.roll_chance
 
         self.hexes.append(h)
 
@@ -331,11 +338,19 @@ class Board:
 
         self.num_rows = self.NUM_ROWS
         self.num_cols = self.NUM_COLS
-        self.grid = [[None] * (4 * self.num_cols + 3) for _ in range(self.num_rows * 8 - 1)]
+        self.grid = [[None] * self.grid_width for _ in range(self.grid_height)]
 
         self.points = self.make_points()
         self.lanes = self.make_lanes()
         self.hexes = self.make_hexes(random)
+
+    @property
+    def grid_width(self):
+        return 4 * self.num_cols + 3
+
+    @property
+    def grid_height(self):
+        return self.num_rows * 4 + 2
 
     def make_hexes(self, random):
         hexes = []
@@ -377,6 +392,9 @@ class Board:
                     lanes.append(new_lane)
                     self.grid[col][row] = new_lane
 
+        for i, lane in enumerate(lanes):
+            lane.id = i
+
         return lanes
 
     def make_points(self):
@@ -391,6 +409,9 @@ class Board:
                 new_point = Point(self, col, row)
                 points.append(new_point)
                 self.grid[col][row] = new_point
+
+        for i, point in enumerate(points):
+            point.id = i
 
         return points
 
@@ -415,3 +436,8 @@ class Board:
         self.draw_hexes()
         self.draw_lanes()
         self.draw_points()
+
+    # TODO make this work for random boards
+    def copy(self, game):
+        b = Board(game)
+        return b

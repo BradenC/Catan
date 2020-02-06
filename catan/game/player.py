@@ -1,60 +1,57 @@
-from catan.game import Resource, resource_color
+from copy import copy
+
+from catan import config, logger
+from catan.game.actions import get_action_by_id, get_legal_action_ids
+from catan.game.resource import resources
 from catan.game.constants import PLAYER_X, PLAYER_Y
 from catan.game.piece import City, Road, Settlement
-from catan.logging import logger
+from catan.agents import Human
 
 
 def action(func):
     def action_wrapper(*args, **kwargs):
         player = args[0]
 
-        logger.info(
+        log_func = logger.debug if player.game.depth == 0 else logger.trace
+        log_func(
             data={
+                'num': player.num,
                 'player': player.name,
-                'function': func.__name__,
-                'arguments': args
+                'depth': player.game.depth,
+                'function': func.__name__
             },
             tags='actions'
         )
 
         func(*args, **kwargs)
 
-        if player.victory_points >= player.game.victory_point_goal:
-            player.game.finish()
-
         player.game.draw()
+
+        if not player.is_cpu:
+            player.game.turn_loop()
 
     return action_wrapper
 
 
 class Player:
-    count = 0
-
     def __init__(self, game, model=None, name=None):
         self.game = game
 
-        self.num = Player.count
-        Player.count += 1
-
-        if model:
-            self.model = model(self)
-            self.is_cpu = True
-            self.name = model.__name__
+        self.model = model
+        if self.model:
+            self.model.player = self
+            self.is_cpu = model.is_cpu
+            self.name = name or model.name
         else:
             self.is_cpu = False
-            self.name = name or f"Player{self.num}"
+            self.name = name
 
-        if self.num == 0:
-            self.color = 'purple'
-        elif self.num == 1:
-            self.color = 'blue'
-        elif self.num == 2:
-            self.color = 'maroon'
-        else:
-            self.color = 'cyan'
+        self._num = None
+        self.color = None
 
         # wood, brick, grain, sheep, ore
         self.resource_cards = [0] * 5
+        # self.resource_cards = [7, 7, 3, 3, 0]
         self.resource_generation = [0] * 5
         self.development_cards = []
         self.cities = []
@@ -63,8 +60,29 @@ class Player:
         self.turn_num = 0
 
     @property
+    def num(self):
+        return self._num
+
+    @num.setter
+    def num(self, num):
+        self._num = num
+
+        if self._num == 0:
+            self.color = 'purple'
+        elif self._num == 1:
+            self.color = 'blue'
+        elif self._num == 2:
+            self.color = 'maroon'
+        else:
+            self.color = 'cyan'
+
+    @property
     def victory_points(self):
         return len(self.settlements) + 2*len(self.cities)
+
+    @property
+    def has_won(self):
+        return self.victory_points >= config['game']['victory_points_to_win']
 
     @property
     def num_remaining_cities(self):
@@ -83,8 +101,7 @@ class Player:
         if not self.game.can_end_turn():
             raise Exception(f'ERROR {self.name} cannot end turn')
 
-        if not self.is_cpu:
-            self.game.end_turn()
+        self.game.end_turn()
 
     @action
     def roll(self):
@@ -95,11 +112,11 @@ class Player:
 
     @action
     def trade(self, give_resource, receive_resource):
-        if self.resource_cards[give_resource.value] < 4:
-            raise Exception(f'ERROR {self.name} cannot trade - not enough {give_resource.name} to give')
+        if self.resource_cards[give_resource] < 4:
+            raise Exception(f'ERROR {self.name} cannot trade - not enough {give_resource} to give')
 
-        self.resource_cards[give_resource.value] -= 4
-        self.resource_cards[receive_resource.value] += 1
+        self.resource_cards[give_resource] -= 4
+        self.resource_cards[receive_resource] += 1
 
     @action
     def build(self, piece_type, position):
@@ -127,9 +144,16 @@ class Player:
         self.add_piece(piece)
         position.piece = piece
 
-    def take_turn(self):
-        if self.is_cpu:
-            self.model.take_turn()
+    def get_legal_action_ids(self):
+        return get_legal_action_ids(self.game)
+
+    def do_action(self):
+        legal_action_ids = self.get_legal_action_ids()
+        if len(legal_action_ids) == 1:
+            func1, args, kwargs = get_action_by_id(self.game, legal_action_ids[0])
+            func1(*args, **kwargs)
+        else:
+            self.model.do_action()
 
     def can_afford(self, piece):
         if piece.get_num_placed_by(self) >= piece.max_per_player:
@@ -177,16 +201,16 @@ class Player:
         if 'res_cards' not in self.game.graphics:
             self.game.graphics['res_cards'] = [None] * len(self.resource_cards)
 
-        for res in Resource:
-            if res.name == 'WATER' or res.name == 'DESERT':
+        for res in resources:
+            if res.name == 'water' or res.name == 'desert':
                 continue
 
             if self.game.graphics['res_cards'][_i]:
                 self.game.c.delete(self.game.graphics['res_cards'][_i][0])
                 self.game.c.delete(self.game.graphics['res_cards'][_i][1])
 
-            rect = self.game.c.create_rectangle(x, y, x + 70, y + 100, outline=resource_color(res), width=4)
-            text = self.game.c.create_text(x + 35, y + 50, text=self.resource_cards[_i], font="default 50", fill=resource_color(res))
+            rect = self.game.c.create_rectangle(x, y, x + 70, y + 100, outline=res.color, width=4)
+            text = self.game.c.create_text(x + 35, y + 50, text=self.resource_cards[_i], font="default 50", fill=res.color)
 
             self.game.graphics['res_cards'][_i] = (rect, text)
             x += 90
@@ -230,7 +254,7 @@ class Player:
 """
         return stat_string
 
-    def to_jsonable(self):
+    def to_dict(self):
         return {
             'name': self.name,
             'num': self.num,
@@ -241,3 +265,19 @@ class Player:
             'num_cities': len(self.cities),
             'resource_cards': self.resource_cards
         }
+
+    def copy(self, game):
+        p = Player(game)
+        p.resource_cards = copy(self.resource_cards)
+        p.resource_generation = copy(self.resource_generation)
+        p.development_cards = copy(self.development_cards)
+        p.cities = [city.copy(game, self) for city in self.cities]
+        p.settlements = [settlement.copy(game, self) for settlement in self.settlements]
+        p.roads = [road.copy(game, self) for road in self.roads]
+        p.turn_num = self.turn_num
+        p.is_cpu = self.is_cpu
+        p.name = self.name
+        p.num = self.num
+        p.color = self.color
+
+        return p
