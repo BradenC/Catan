@@ -254,12 +254,6 @@ class Game:
         self.end_time = time()
         self.draw()
 
-        # game_finished_message = 'Game Over'
-        # game_recap = self.game_recap()
-        # player_recap = self.player_recap()
-        #
-        # logger.info(game_finished_message + game_recap + player_recap)
-
         logger.info('Game over', data=self.to_dict(), tags='progress')
 
     def to_dict(self):

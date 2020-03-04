@@ -14,15 +14,19 @@ from catan.files import dirname_models
 from catan.game.actions import get_action_by_id, get_legal_action_ids, num_unique_actions
 from catan.agents.agent import Agent
 
+NUM_UNIQUE_ACTIONS = num_unique_actions()
+
 
 def timed(func):
     def time_wrapper(*args, **kwargs):
+        global timelog
         start = timeit.default_timer()
         ret = func(*args, **kwargs)
         duration = timeit.default_timer() - start
 
         if config['logging']['categories']['timing']:
-            print(f'duration: {duration} | func: {func.__name__}')
+            timelog += f'duration: {duration} | func: {func.__name__}\n'
+            # print(f'duration: {duration} | func: {func.__name__}')
 
         return ret
 
@@ -164,37 +168,39 @@ class OutBlock(nn.Module):
         self.fc1 = nn.Linear(3 * 22 * 23, 16)
         self.fc2 = nn.Linear(16, 1)
 
-        self.conv1 = nn.Conv2d(32, 16, kernel_size=1)  # policy head
+        self.conv1 = nn.Conv2d(32, 16, kernel_size=1)
         self.bn1 = nn.BatchNorm2d(16)
-        self.logsoftmax = nn.LogSoftmax(dim=1)
-        self.fc = nn.Linear(16 * 22 * 23, 202)  # TODO switch this for a variable length = num_unique_legal_moves
+        self.fc = nn.Linear(16 * 22 * 23, NUM_UNIQUE_ACTIONS)
+        self.softmax = nn.Softmax(dim=1)
 
     def forward(self, s):
         v = self.conv(s)
         v = self.bn(v)
-        v = F.relu(v)  # value head
+        v = F.relu(v)
         v = v.view(-1, 3 * 22 * 23)  # batch_size X channel X height X width
         v = self.fc1(v)
         v = F.relu(v)
-        v = torch.tanh(self.fc2(v))
+        v = self.fc2(v)
+        v = torch.tanh(v)
 
         p = self.conv1(s)
         p = self.bn1(p)
         p = F.relu(p)
         p = p.view(-1, 22 * 23 * 16)
         p = self.fc(p)
-        p = self.logsoftmax(p).exp()
+        p = self.softmax(p)
+        # p = p2.exp()
 
         return p, v
 
 
 class AlphaLoss(nn.Module):
-    def forward(self, policy, y_policy, value, y_value):
-        policy = policy.view(-1)
-        value = value.view(-1)
+    def forward(self, policy_x, policy_y, val_x, val_y):
+        policy_x = policy_x.view(-1)
+        val_x = val_x.view(-1)
 
-        policy_error = torch.sum((-policy*(1e-8 + y_policy).log()))
-        value_error = (value - y_value) ** 2
+        policy_error = torch.sum((-policy_y * ((1e-8 + policy_x).log())))
+        value_error = (val_x - val_y) ** 2
         total_error = (value_error + policy_error).mean()
 
         return total_error
@@ -224,7 +230,6 @@ class ZeroCNN(nn.Module):
 
     def load(self, net_version=None):
         self.load_state_dict(torch.load(self.get_path(net_version)))
-        self.eval()
         self.to(device)
 
     def save(self, net_version=None):
@@ -233,7 +238,7 @@ class ZeroCNN(nn.Module):
 
 class MCTNode:
     # executor = ProcessPoolExecutor(max_workers=6)
-    executor = ThreadPoolExecutor(max_workers=6)
+    # executor = ThreadPoolExecutor(max_workers=6)
 
     # @timed
     def __init__(self, game, net, action_id=None, parent=None):
@@ -245,16 +250,23 @@ class MCTNode:
             func, args, kwargs = get_action_by_id(self.game, action_id)
             func(*args, **kwargs)
 
-            legal_actions = self.game.player.get_legal_action_ids()
-            while len(legal_actions) == 1:
-                func, args, kwargs = get_action_by_id(self.game, legal_actions[0])
-                func(*args, **kwargs)
-                legal_actions = self.game.player.get_legal_action_ids()
+            while True:
+                if self.game.can_roll():
+                    self.game.player.roll()
+                else:
+                    legal_actions = self.game.player.get_legal_action_ids()
+                    if len(legal_actions) == 1:
+                        func, args, kwargs = get_action_by_id(self.game, legal_actions[0])
+                        func(*args, **kwargs)
+                    else:
+                        break
 
         self.w = 0  # total q value
         self.n = 0  # number of visits
 
         self.parent = parent
+        self.original_priors = None
+        self.legal_action_ids = []
         self.priors = None
         self.children = [0] * num_unique_actions(game)
 
@@ -273,18 +285,18 @@ class MCTNode:
 
     @property
     def q(self):
-        n = self.n or 1
-
         if self.game.is_finished:
             return 1
         else:
+            n = self.n or 1
             return self.w / n
 
     @property
     def pi(self):
         pi = np.asarray([0 if not isinstance(s, MCTNode) else s.n for s in self.children])
         pi_sum = np.sum(pi)
-        pi = pi/pi_sum
+        if pi_sum > 0:
+            pi = pi/pi_sum
 
         return pi
 
@@ -292,11 +304,12 @@ class MCTNode:
     def favorite_child(self, net):
         logger.trace(f'node id: {id(self)}', tags='mcts')
 
+        MCTNode.favorite_child.count += 1
         expanding = []
 
         max_u, best_a = -float("inf"), -1
         for a in range(num_unique_actions(self.game)):
-            if self.priors[a] == 0:  # Investigate if this line can be removed. Softmax last layer should prevent negative vals.
+            if self.priors[a] == 0:
                 continue
 
             s = self.children[a]
@@ -304,7 +317,9 @@ class MCTNode:
                 # if s.expansion is not None and s.expansion.running():
                 #     expanding.append(s)
                 #     continue
-                u = s.q + config['training']['c_puct'] * self.priors[a] * np.sqrt(self.n) / (1 + s.n)
+                q = s.q if s.game.player.num == self.game.player.num else -s.q
+                q *= config['training']['q_mult_factor']
+                u = q + config['training']['c_puct'] * self.priors[a] * np.sqrt(self.n) / (1 + s.n)
             else:
                 u = config['training']['c_puct'] * self.priors[a] * np.sqrt(self.n)
 
@@ -319,7 +334,12 @@ class MCTNode:
                 wait([node.expansion])
                 return node
             else:
-                logger.error("No legal moves detected", data={"player_num": self.game.player.num})
+                logger.error("No legal moves detected", data={
+                    "player_num": self.game.player.num,
+                    "original_priors": self.original_priors.data.numpy().tolist(),
+                    "legal_actions": get_legal_action_ids(self.game),
+                    "priors": self.priors.data.numpy().tolist()
+                })
                 raise Exception(f"No legal moves for player {self.game.player.name}")
 
         a = best_a
@@ -335,12 +355,17 @@ class MCTNode:
     # @timed
     def expand(self, net):
         logger.trace(f'node id: {id(self)}', tags='mcts')
+        MCTNode.expand.count += 1
 
         with torch.no_grad():
             child_priors, value_estimate = net(GameState.from_game(self.game))
 
         self.priors = child_priors.view(-1).cpu()
+        self.original_priors = self.priors.clone().detach()
         self.w = value_estimate.item()
+
+        if self.parent is None:
+            self.add_dirichlet_noise()
 
         # Mask illegal actions
         legal_action_ids = get_legal_action_ids(self.game)
@@ -348,9 +373,19 @@ class MCTNode:
             if i not in legal_action_ids:
                 self.priors[i] = 0
 
-        # add dirichlet noise to child_priors in root node
-        # if self.parent.parent == None:
-        #     child_priors = self.add_dirichlet_noise(legal_action_ids, child_priors)
+        if len(legal_action_ids) == 0:
+            raise Exception('Legal action ids is empty')
+
+        self.legal_action_ids = legal_action_ids
+
+    def add_dirichlet_noise(self):
+        eps = config['training']['dirichlet']['epsilon']
+
+        alphas = (np.ones(NUM_UNIQUE_ACTIONS,) * config['training']['dirichlet']['alpha'])
+        noise = torch.from_numpy(np.random.default_rng().dirichlet(alphas))
+
+        self.priors = torch.add(self.priors * (1 - eps), noise * eps)
+        # torch.add(self.priors * (1 - eps), noise * eps, out=self.priors)
 
     # @timed
     def backup(self):
@@ -372,6 +407,41 @@ class MCTNode:
     def backup_from_future(fut):
         fut.node.backup()
 
+    def log(self):
+        logger.debug(f'''\
+self id: {id(self)}
+cards: {self.game.player.resource_cards}
+legal action ids: {self.legal_action_ids}
+
+q: {self.q}
+n: {self.n}
+
+a, n, p, q, u:
+{
+        np.asarray([
+            (
+                i,
+                s.n,
+                self.priors[i].item(),
+                s.q,
+                s.q + config['training']['c_puct'] * self.priors[i].item() * np.sqrt(self.n) / (1 + s.n)
+            )
+                for i, s in enumerate(self.children) if isinstance(s, MCTNode)
+        ])
+}
+
+original_priors:
+{self.original_priors}
+''')
+        for node in self.children:
+            if isinstance(node, MCTNode):
+                node.log()
+        logger.debug('up')
+
+
+MCTNode.favorite_child.count = 0
+MCTNode.expand.count = 0
+
 
 class ZeroMCT:
     def __init__(self):
@@ -379,6 +449,9 @@ class ZeroMCT:
 
     # @timed
     def search(self, game, net, num_iterations=None):
+        start = timeit.default_timer()
+        MCTNode.favorite_child.count = 0
+        MCTNode.expand.count = 0
         num_iterations = num_iterations or config['training']['mcts_iterations']
 
         self.root = MCTNode(game, net)
@@ -387,30 +460,60 @@ class ZeroMCT:
 
         for i in range(num_iterations):
             logger.trace(f'Return to root - iteration {i}', tags='mcts')
-            current = self.root
 
-            while current.n > 0 and not current.game.is_finished:
+            current = self.root
+            while current.n > 0:
                 current = current.favorite_child(net)
+                if current.game.is_finished:
+                    current.backup()
+                    break
 
             current.n = 1
+
+        end = timeit.default_timer()
+        self.log(duration=end-start)
 
     @property
     def pi(self):
         return self.root.pi
 
+    def log(self, duration):
+        if config['logging']['categories']['mcts']:
+            np.set_printoptions(linewidth=120, suppress=True, precision=8)
+            torch.set_printoptions(linewidth=120, precision=8)
+            logger.debug(f'Search Complete\n'
+                         f'Player: {self.root.game.player.num} | {self.root.game.player.name}\n'
+                         f'Duration: {duration}s\n'
+                         f'Fav_child Count: {MCTNode.favorite_child.count}\n'
+                         f'Expand Count: {MCTNode.expand.count}\n'
+                         f'Duration/Fav_child: {duration / MCTNode.favorite_child.count}\n'
+                         f'Duration/Expand: {duration / MCTNode.expand.count}')
+            self.root.log()
+
 
 class ZeroBot(Agent):
     raw_samples = []
     samples = []
-    net = ZeroCNN()
-    # optimizer = optim.SGD(
-    #     net.parameters(),
-    #     lr=config['training']['learning rate'],
-    #     momentum=config['training']['momentum']
-    # )
-    optimizer = optim.Adam(net.parameters(), lr=config['training']['learning rate'])
-    criterion = AlphaLoss()
+    net = ZeroCNN().to(device)
 
+    if config['training']['optimizer'] == 'Adam':
+        optimizer = optim.Adam(
+            net.parameters(),
+            lr=config['training']['learning rate']
+        )
+    elif config['training']['optimizer'] == 'SGD':
+        optimizer = optim.SGD(
+            net.parameters(),
+            lr=config['training']['learning rate'],
+            momentum=config['training']['momentum']
+        )
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(
+            optimizer,
+            milestones=config['training']['milestones'],
+            gamma=config['training']['lr_gamma']
+        )
+
+    criterion = AlphaLoss().to(device)
     threshold = .55
 
     def __init__(self, net_version=None, name=None):
@@ -419,19 +522,12 @@ class ZeroBot(Agent):
         if net_version is not None:
             self.net = ZeroCNN()
             self.net.load(net_version)
-            self.net.optimizer = optim.SGD(self.net.parameters(), lr=0.001, momentum=0.9)
             self.name = name or f'Zero_v{net_version}'
         else:
             self.net = ZeroBot.net
-            self.net.optimizer = ZeroBot.optimizer
             self.name = name or 'Zero'
 
-        self.net.to(device)
-        self.net.eval()
-
         self.mct = ZeroMCT()
-
-        self.training_samples = []
 
     @property
     def player(self):
@@ -471,12 +567,12 @@ class ZeroBot(Agent):
 
     @staticmethod
     def train():
+        batch_size = len(ZeroBot.samples) // 10
         shuffle(ZeroBot.samples)
-        ZeroBot.net.train()
 
-        for epoch in range(2):
+        for epoch in range(config['training']['num_epochs']):
 
-            # running_loss = 0.0
+            running_loss = 0.0
             for i, sample in enumerate(ZeroBot.samples):
                 inputs, pi_target, v_target = sample
 
@@ -487,11 +583,17 @@ class ZeroBot(Agent):
                 # zero the parameter gradients
                 ZeroBot.optimizer.zero_grad()
 
+                # forward + backward + optimize
                 pi_out, v_out = ZeroBot.net(inputs)
                 loss = ZeroBot.criterion(pi_out, pi_target, v_out, v_target)
                 loss.backward()
-
                 ZeroBot.optimizer.step()
+                ZeroBot.scheduler.step()
 
-        ZeroBot.net.eval()
+                # print statistics
+                running_loss += loss.item()
+                if i % batch_size == batch_size - 1:  # print every 100 mini-batches
+                    logger.debug(f'[{epoch + 1}, {i + 1}] loss: {running_loss / batch_size}', tags='training')
+                    running_loss = 0.0
+
         ZeroBot.samples = []

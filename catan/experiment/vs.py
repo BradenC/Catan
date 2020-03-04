@@ -14,10 +14,10 @@ def vs(players, num_games):
     game_results = []
 
     for _ in tqdm(range(num_games)):
-        g = Game(players)
-        g.start()
+        game = Game(players)
+        game.start()
 
-        game_results.append(g.to_dict())
+        game_results.append(game.to_dict())
 
     logger.info(
         message=f'Player {players[0].name} won {count_wins(game_results, players[0].name)}/{num_games} games against {players[1].name}',

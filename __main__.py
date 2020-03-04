@@ -3,6 +3,8 @@ import os
 import sys
 import tkinter
 
+from datetime import datetime
+
 from catan import config
 from catan.experiment import vs, train
 from catan.game.game import Game
@@ -41,6 +43,8 @@ else:
 # Graphics are always on if a human is playing
 one_human = any(isinstance(player, Human) for player in players)
 graphics = bool(args.graphics or one_human)
+
+print(datetime.now().strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3])
 
 if graphics:
     # Add vars to config (just for logging, tbh)

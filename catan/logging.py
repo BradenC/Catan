@@ -36,7 +36,7 @@ class Logger:
 
         return False
 
-    def log(self, message='', data={}, tags=[], level=None):
+    def _log(self, message=None, data=None, tags=None, level=None):
         if isinstance(tags, str):
             tags = [tags]
 
@@ -48,36 +48,45 @@ class Logger:
 
             self.write(' | ' + inspect.stack()[2].function, end='')
 
-            if tags:
+            if tags is not None:
                 self.write(' | [ ' + ', '.join(tags) + ' ]', end='')
 
             self.write(' | ' + datetime.now().strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3])
 
-            if message:
+            if message is not None:
                 self.write(message)
 
-            if data:
+            if data is not None:
                 self.write(json.dumps(data))
 
-    def trace(self, message='', data={}, tags=[]):
+    def trace(self, message=None, data=None, tags=None):
         if self.level >= LogLevel.TRACE:
-            self.log(message, data, tags, LogLevel.TRACE)
+            self._log(message, data, tags, LogLevel.TRACE)
 
-    def debug(self, message='', data={}, tags=[]):
+    def debug(self, message=None, data=None, tags=None):
         if self.level >= LogLevel.DEBUG:
-            self.log(message, data, tags, LogLevel.DEBUG)
+            self._log(message, data, tags, LogLevel.DEBUG)
 
-    def info(self, message='', data={}, tags=[]):
+    def info(self, message=None, data=None, tags=None):
         if self.level >= LogLevel.INFO:
-            self.log(message, data, tags, LogLevel.INFO)
+            self._log(message, data, tags, LogLevel.INFO)
 
-    def warn(self, message='', data={}, tags=[]):
+    def warn(self, message=None, data=None, tags=None):
         if self.level >= LogLevel.WARN:
-            self.log(message, data, tags, LogLevel.WARN)
+            self._log(message, data, tags, LogLevel.WARN)
 
-    def error(self, message='', data={}, tags=[]):
+    def error(self, message=None, data=None, tags=None):
         if self.level >= LogLevel.ERROR:
-            self.log(message, data, tags, LogLevel.ERROR)
+            self._log(message, data, tags, LogLevel.ERROR)
+
+    def log(self, message=None, data=None, tags=None):
+        self._log(message, data, tags, LogLevel.ALL)
+
+    @staticmethod
+    def write_to(filename, text):
+        with open(dirname + '/' + filename, 'a+') as f:
+            f.write(text)
+            f.write('\n')
 
 
 logger = Logger()

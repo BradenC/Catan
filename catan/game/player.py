@@ -149,7 +149,9 @@ class Player:
 
     def do_action(self):
         legal_action_ids = self.get_legal_action_ids()
-        if len(legal_action_ids) == 1:
+        if self.game.can_roll():
+            self.roll()
+        elif len(legal_action_ids) == 1:
             func1, args, kwargs = get_action_by_id(self.game, legal_action_ids[0])
             func1(*args, **kwargs)
         else:

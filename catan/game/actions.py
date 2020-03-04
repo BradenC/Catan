@@ -1,12 +1,16 @@
 from catan.game.piece import City, Road, Settlement
 
 
-def num_unique_actions(game):
+def num_unique_actions(game=None):
     """
     Number of unique actions possible in a game
-    = end_turn(1) + roll(1) + road actions + settlement actions + city actions + trade actions
+    = end_turn(1) + road actions(72) + settlement actions(54) + city actions(54) + trade actions(20)
+    = 201
     """
-    return 1 + 1 + len(game.board.lanes) + 2 * len(game.board.points) + 20
+    if game is not None:
+        return 1 + len(game.board.lanes) + 2 * len(game.board.points) + 20
+    else:
+        return 201
 
 
 def find_legal_trade_actions(game):
@@ -76,13 +80,12 @@ def trade_pair_to_id(pair):
 
 def get_legal_action_ids(game):
     """Find all legal moves for the current player"""
-    road_start = 2
+    road_start = 1
     settlement_start = road_start + len(game.board.lanes)
     city_start = settlement_start + len(game.board.points)
     trade_start = city_start + len(game.board.points)
 
     end_turn = [0] if game.can_end_turn() else []
-    roll = [1] if game.can_roll() else []
 
     road_actions = [lane.id + road_start for lane in find_legal_lanes_for_roads(game)]
     settlement_actions = [point.id + settlement_start for point in find_legal_points_for_settlements(game)]
@@ -100,13 +103,12 @@ def get_legal_action_ids(game):
     # print(f'city actions: {city_actions}')
     # print(f'trade actions: {trade_actions}')
 
-    return end_turn + roll + road_actions + settlement_actions + city_actions + trade_actions
+    return end_turn + road_actions + settlement_actions + city_actions + trade_actions
 
 
 def get_action_by_id(game, action_id):
     end_turn = 0
-    roll_dice = 1
-    road_start = 2
+    road_start = 1
     settlement_start = road_start + len(game.board.lanes)
     city_start = settlement_start + len(game.board.points)
     trade_start = city_start + len(game.board.points)
@@ -117,9 +119,6 @@ def get_action_by_id(game, action_id):
 
     if action_id == end_turn:
         func = game.player.end_turn
-
-    elif action_id == roll_dice:
-        func = game.player.roll
 
     elif action_id < trade_start:
         func = game.player.build

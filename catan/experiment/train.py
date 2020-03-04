@@ -49,7 +49,8 @@ def train(agent, canvas=None, turn_delay_s=None):
         p1, p2 = agent(), agent(net_version=i)
         vs_results = vs([p1, p2], config['training']['games_per_improvement_test'])
 
-        if win_ratio(vs_results, p1.name) > agent.threshold:
+        if win_ratio(vs_results, p1.name) < agent.threshold:
+            logger.debug(f'Win ratio not achieved. Reverting back to version {i}.', tags='training')
             agent.net.load(i)
 
         vs_random_results += vs([agent(), RandomBot()], config['training']['games_per_ground_test'])
